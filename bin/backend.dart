@@ -14,25 +14,38 @@ const _pbkdf2Length = 32;
 enum UserRole { nutzer, admin, vorsitz, kassenwart }
 
 Future<void> main() async {
-  final port = int.tryParse(Platform.environment['PORT'] ?? '') ?? 8080;
+  final envFilePath = Platform.environment['ENV_FILE'] ?? '/etc/dlrg-backend.env';
+  final fileEnvironment = _loadEnvFile(envFilePath);
+  final port = int.tryParse(_readConfig('PORT', fileEnvironment) ?? '') ?? 8080;
   final address = InternetAddress.anyIPv4;
-  final dbPath = Platform.environment['DB_PATH'] ?? 'data/dlrg_backend.db';
-  final serverPepper = Platform.environment['SERVER_PEPPER'] ?? 'dlrg-default-pepper-change-me';
-  final adminUsername = Platform.environment['ADMIN_USERNAME'] ?? 'admin';
-  final adminPassword = Platform.environment['ADMIN_PASSWORD'] ?? 'Admin123!';
+  final dbPath = _readConfig(
+    'DB_PATH',
+    fileEnvironment,
+    defaultValue: 'data/dlrg_backend.db',
+  )!;
+  final serverPepper = _requireConfig('SERVER_PEPPER', fileEnvironment);
+  final adminUsername = _readConfig('ADMIN_USERNAME', fileEnvironment);
+  final adminPassword = _readConfig('ADMIN_PASSWORD', fileEnvironment);
 
   final database = _openDatabase(dbPath);
   _createSchema(database);
-  await _seedAdminUser(
-    database: database,
-    adminUsername: adminUsername,
-    adminPassword: adminPassword,
-    serverPepper: serverPepper,
-  );
+  if ((adminUsername ?? '').isNotEmpty && (adminPassword ?? '').isNotEmpty) {
+    await _seedAdminUser(
+      database: database,
+      adminUsername: adminUsername!,
+      adminPassword: adminPassword!,
+      serverPepper: serverPepper,
+    );
+  } else {
+    stdout.writeln(
+      'Admin seed skipped: set ADMIN_USERNAME and ADMIN_PASSWORD in server environment file to enable.',
+    );
+  }
 
   final server = await HttpServer.bind(address, port);
   stdout.writeln('$_serviceName listening on ${server.address.address}:$port');
   stdout.writeln('Database path: $dbPath');
+  stdout.writeln('Environment file: $envFilePath');
 
   ProcessSignal.sigint.watch().listen((_) async {
     stdout.writeln('Received SIGINT, shutting down backend...');
@@ -417,4 +430,64 @@ class _AuthResult {
   const _AuthResult({required this.role});
 
   final UserRole role;
+}
+
+String? _readConfig(
+  String key,
+  Map<String, String> fileEnvironment, {
+  String? defaultValue,
+}) {
+  final fromSystem = Platform.environment[key];
+  if (fromSystem != null && fromSystem.isNotEmpty) {
+    return fromSystem;
+  }
+
+  final fromFile = fileEnvironment[key];
+  if (fromFile != null && fromFile.isNotEmpty) {
+    return fromFile;
+  }
+
+  return defaultValue;
+}
+
+Map<String, String> _loadEnvFile(String path) {
+  final file = File(path);
+  if (!file.existsSync()) {
+    stdout.writeln('Environment file not found at $path, using process environment only.');
+    return const {};
+  }
+
+  final values = <String, String>{};
+  for (final line in file.readAsLinesSync()) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty || trimmed.startsWith('#')) {
+      continue;
+    }
+
+    final index = trimmed.indexOf('=');
+    if (index <= 0) {
+      continue;
+    }
+
+    final key = trimmed.substring(0, index).trim();
+    var value = trimmed.substring(index + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.substring(1, value.length - 1);
+    }
+    values[key] = value;
+  }
+
+  return values;
+}
+
+String _requireConfig(String key, Map<String, String> fileEnvironment) {
+  final value = _readConfig(key, fileEnvironment);
+  if (value == null || value.isEmpty) {
+    stderr.writeln(
+      'Missing required configuration "$key". Set it in systemd environment or ENV_FILE.',
+    );
+    exit(1);
+  }
+  return value;
 }
